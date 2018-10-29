@@ -1,0 +1,146 @@
+---
+  # Install python 2.7
+  #pre_tasks
+  - name: 'Install python2'
+    raw: sudo apt-get -y install python-simplejson  
+  
+  - name: install required packages
+    apt: name={{ item }} state=present
+    with_items:
+      - build-essential
+      - tcl
+  
+  - name: Download redis src
+    unarchive: 
+      src: http://download.redis.io/redis-stable.tar.gz 
+      copy: no
+      dest: /tmp
+      mode: u=rwx,g=rx,o=rx
+      owner: root
+      creates: /tmp/redis-stable
+  
+  - name: Make redis
+    make: chdir=/tmp/redis-stable
+  
+  - name: Test and install redis
+    make: chdir=/tmp/redis-stable target={{ item }}
+    become: yes
+    with_items:
+      - test
+      - install
+
+  - name: Create /etc/redis, data, logs, and socket directories
+    file: path={{ item }} state=directory
+    with_items:
+      - /etc/redis
+      - /var/lib/redis
+      - /var/log/redis
+      - /var/run/redis
+
+  - name: copy default redis.conf
+    # create a copy of the default redis.conf
+    copy: remote_src=True
+      src=/tmp/redis-stable/redis.conf
+      dest=/etc/redis/redis.conf
+    become: yes
+
+  - name: Configure systemmd
+    lineinfile: dest=/etc/redis/redis.conf 
+      regexp='^supervised no$' 
+      line='supervised systemd'
+      state=present
+
+  - name: Store redis data in /var/lib/redis
+    lineinfile: dest=/etc/redis/redis.conf
+      regexp='^dir ./$'
+      line='dir /var/lib/redis'
+      state=present
+  
+  - name: Cecure redis
+    lineinfile: dest=/etc/redis/redis.conf
+      regexp='^# requirepass \w*$'
+      line='requirepass {{ redis_password }}'
+      state=present
+  
+  - name: Bind to redis.bind_addr
+    lineinfile: dest=/etc/redis/redis.conf
+      regexp='^bind {{ ipv4_addr }}$'
+      line='bind {{ redis_bind_addr }}'
+      state=present
+
+  - name: Configure logging
+    lineinfile: dest=/etc/redis/redis.conf
+      regexp='^logfile ""$'
+      line='logfile {{ redis_logfile }}'
+      state=present
+
+  - name: Disable Transparent Huge Pages (THP) support
+    lineinfile: dest=/etc/rc.local
+      insertbefore='^exit 0$'
+      line='echo never > /sys/kernel/mm/transparent_hugepage/enabled'
+      state=present
+    become: yes
+
+  - name: Fix TCP backlog
+    lineinfile: dest=/etc/rc.local
+      insertbefore='^exit 0$'
+      line='net.core.somaxconn={{ redis_tcp_sockets }}'
+      state=present
+    become: yes
+
+  - command: sysctl -w net.core.somaxconn={{ redis_tcp_sockets }}
+    become: yes
+
+  - name: Enable low-memory background saves
+    lineinfile: dest=/etc/sysctl.conf
+      regexp=''
+      insertafter=EOF
+      line='vm.overcommit_memory = 1'
+    become: yes
+
+  - command: sysctl vm.overcommit_memory=1
+    become: yes
+
+  - name: Create redis-as-a-service
+    template: src=templates/redis.service.j2 
+      dest=/etc/systemd/system/redis.service
+      owner=root
+      group=root
+      mode=0644
+
+  - name: Create redis group
+    group: name=redis state=present
+
+  - name: Create redis user
+    user: name={{ redis_user }}
+      group={{ redis_group }}
+      shell=/bin/bash
+      createhome=no
+  
+  - name: enable unix socket support
+    lineinfile: dest=/etc/redis/redis.conf
+      regexp='^unixsocket {{ redis_socket }}$'
+      line='unixsocket {{ redis_socket }}'
+      state=present
+      insertafter=EOF
+      create=True
+
+  - name: configure unix socket permissions
+    lineinfile: dest=/etc/redis/redis.conf
+      regexp='^unixsocketperm {{ redis_socket_permissions }}$'
+      line='unixsocketperm {{ redis_socket_permissions }}'
+      state=present
+      insertafter=EOF
+      create=True
+
+  - name: set permissions for redis
+    file: path={{ item }} state=touch owner=redis group=redis mode=0770
+    with_items:
+      - /etc/redis
+      - /var/lib/redis
+      - /var/log/redis
+      - /var/run/redis
+    become: yes
+
+  - name: start redis
+    service: name=redis state=restarted enabled=yes

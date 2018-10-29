@@ -1,0 +1,3 @@
+---
+  - name: IncludeTasks Redis
+    include_tasks: redis.yml
